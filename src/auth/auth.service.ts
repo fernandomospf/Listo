@@ -14,81 +14,107 @@ export class AuthService {
 
   async register(dto: RegisterDto) {
     try {
-      const { data: existing, error: qErr } = await this.admin.admin
-        .from('user_profile')
-        .select('id')
-        .eq('username', dto.username)
-        .maybeSingle();
+      this.logger.log(`Iniciando registro para: ${dto.email}`);
 
-      if (qErr) {
-        this.logger.error(`Erro ao verificar username: ${qErr.message}`);
-        throw new InternalServerErrorException('Erro interno do servidor');
-      }
-      
-      if (existing) {
-        throw new ConflictException('Username já está em uso');
+      const { data: allUsers, error: allError } = await this.admin.admin
+        .from('user')
+        .select('id, email, name')
+        .order('created_at', { ascending: false });
+
+      if (!allError && allUsers) {
+        this.logger.log(`Total de usuários na tabela: ${allUsers.length}`);
+        allUsers.forEach(user => {
+          this.logger.log(`Usuário: ${user.id} - ${user.email} - ${user.name}`);
+        });
       }
 
-     
-      const { data: existingEmail } = await this.admin.admin
-        .from('user_profile')
-        .select('id')
+      const { data: existingUser } = await this.admin.admin
+        .from('user')
+        .select('id, email, name')
         .eq('email', dto.email)
         .maybeSingle();
 
-      if (existingEmail) {
+      if (existingUser) {
+        this.logger.log(`CONFLITO: Email encontrado - ${existingUser.email} (ID: ${existingUser.id})`);
         throw new ConflictException('Email já está em uso');
       }
 
+      this.logger.log(`Email ${dto.email} disponível, criando usuário...`);
 
-      const { data: created, error: aErr } = await this.admin.admin.auth.admin.createUser({
+      const { data: createdUser, error: createError } = await this.admin.admin.auth.admin.createUser({
         email: dto.email,
         password: dto.password,
         email_confirm: true,
         user_metadata: { 
           name: dto.name, 
-          username: dto.username 
         },
       });
 
-      if (aErr || !created?.user) {
-        this.logger.error(`Erro ao criar usuário: ${aErr?.message}`);
-        throw new InternalServerErrorException('Falha ao criar usuário');
+      if (createError || !createdUser?.user) {
+        throw new InternalServerErrorException('Falha ao criar usuário no sistema');
       }
 
-      const userId = created.user.id;
+      const authUserId = createdUser.user.id;
 
-   
-      const { error: pErr } = await this.admin.admin
-        .from('user_profile')
+      const { data: insertedUser, error: insertUserError } = await this.admin.admin
+        .from('user')
         .insert({
-          id: userId,
-          username: dto.username,
           name: dto.name,
           email: dto.email,
-        });
+          created_at: new Date().toISOString(),
+        })
+        .select('id, email')
+        .single();
 
-      if (pErr) {
-        await this.admin.admin.auth.admin.deleteUser(userId);
-        this.logger.error(`Erro ao criar perfil: ${pErr.message}`);
-        throw new InternalServerErrorException('Falha ao criar perfil do usuário');
+      if (insertUserError) {
+        this.logger.error(`Erro na inserção: ${insertUserError.message}`);
+        
+        if (insertUserError.code === '23505') {
+          this.logger.log(`Tentando UPDATE do registro existente...`);
+          
+          const { data: updatedUser, error: updateError } = await this.admin.admin
+            .from('user')
+            .update({
+              name: dto.name,
+              created_at: new Date().toISOString(),
+            })
+            .eq('email', dto.email)
+            .select('id, email')
+            .single();
+
+          if (updateError) {
+            this.logger.error(`Erro no UPDATE: ${updateError.message}`);
+            await this.admin.admin.auth.admin.deleteUser(authUserId);
+            throw new ConflictException('Email já está cadastrado no sistema');
+          }
+
+          this.logger.log(`Registro atualizado: ${updatedUser.id}`);
+          return {
+            id: updatedUser.id,
+            email: dto.email,
+            name: dto.name,
+            message: 'Usuário atualizado com sucesso'
+          };
+        }
+        
+        await this.admin.admin.auth.admin.deleteUser(authUserId);
+        throw new InternalServerErrorException('Falha ao criar registro do usuário');
       }
 
-      this.logger.log(`Usuário criado com sucesso: ${dto.email}`);
+      this.logger.log(`Novo usuário criado: ${insertedUser.id}`);
 
       return {
-        id: userId,
-        email: created.user.email,
-        username: dto.username,
+        id: insertedUser.id,
+        email: dto.email,
         name: dto.name,
-        created_at: created.user.created_at,
+        message: 'Usuário criado com sucesso'
       };
 
     } catch (error) {
       if (error instanceof ConflictException || error instanceof InternalServerErrorException) {
         throw error;
       }
-      this.logger.error(`Erro desconhecido no registro: ${error.message}`);
+      this.logger.error(`Erro no registro: ${error.message}`);
       throw new InternalServerErrorException('Erro interno do servidor');
     }
   }
