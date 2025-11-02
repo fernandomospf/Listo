@@ -67,7 +67,8 @@ export class TasksService {
         .from('task')
         .update({
           completed_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
+          status: 'done'
         })
         .eq('id', taskId)
         .eq('user_id', userId)
